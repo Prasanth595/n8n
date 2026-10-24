@@ -340,6 +340,7 @@ export class AssistantTurnEnvironmentFactory {
 			aiPreferencesEnabled,
 			modelId,
 			allowSendingParameterValues,
+			temporaryWorkflowMarkers: runtime.temporaryWorkflowMarkers,
 		});
 
 		const browserMcpServer = browserUseEnabledGlobally
