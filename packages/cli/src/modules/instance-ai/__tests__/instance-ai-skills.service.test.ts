@@ -1,7 +1,8 @@
 import type { User } from '@n8n/db';
 import { mock } from 'vitest-mock-extended';
-import { AssistantSkillProviderProxy } from '@n8n/backend-services';
 import { loadInstanceAiSkills, resolvePromptProfile } from '@n8n/instance-ai';
+
+import type { AssistantSkillsFlagGate, SkillRuntimeService } from '@/modules/skills';
 
 import {
 	InstanceAiSkillsService,
@@ -35,7 +36,7 @@ const gatedSkills: Array<[string, InstanceAiSkillScope, SkillId[]]> = [
 ];
 
 describe('InstanceAiSkillsService', () => {
-	const service = new InstanceAiSkillsService(new AssistantSkillProviderProxy());
+	const service = new InstanceAiSkillsService(mock(), mock());
 
 	it('refers only to skills that exist', () => {
 		const bundled = loadInstanceAiSkills().registry.skills.map(({ id }) => id);
@@ -102,13 +103,43 @@ describe('InstanceAiSkillsService', () => {
 	});
 });
 
-describe('Assistant Hub provider boundary', () => {
+describe('Assistant reads of user skills', () => {
 	const context = { user: mock<User>(), projectId: 'project-1' };
+	const summary = {
+		id: 'skill-1',
+		projectId: null,
+		name: 'Tone',
+		description: 'Writing style',
+		versionId: 'version-1',
+		version: 1,
+	};
+	const content = { ...summary, instructions: 'Be brief.', frontmatter: null, files: [] };
+	const gate = mock<AssistantSkillsFlagGate>();
+	const skillRuntime = mock<SkillRuntimeService>();
+	const service = new InstanceAiSkillsService(gate, skillRuntime);
 
-	it('supplies no Hub skills without a registered provider', async () => {
-		const service = new InstanceAiSkillsService(new AssistantSkillProviderProxy());
-		expect(await service.listHubSkills(context)).toEqual([]);
-		expect(await service.readHubSkill(context, 'unknown')).toBeNull();
+	beforeEach(() => {
+		vi.resetAllMocks();
+		skillRuntime.listForAssistant.mockResolvedValue([summary]);
+		skillRuntime.readForAssistant.mockResolvedValue(content);
+	});
+
+	it('reads nothing while Assistant skills are off', async () => {
+		gate.isEnabled.mockResolvedValue(false);
+
+		expect(await service.listUserSkills(context)).toEqual([]);
+		expect(await service.readUserSkill(context, summary.id)).toBeNull();
+		expect(skillRuntime.listForAssistant).not.toHaveBeenCalled();
+		expect(skillRuntime.readForAssistant).not.toHaveBeenCalled();
 		expect((await service.loadSkills(openScope)).source.registry.skills.length).toBeGreaterThan(0);
+	});
+
+	it('reads the skills of the user while Assistant skills are on', async () => {
+		gate.isEnabled.mockResolvedValue(true);
+
+		expect(await service.listUserSkills(context)).toEqual([summary]);
+		expect(await service.readUserSkill(context, summary.id)).toEqual(content);
+		expect(skillRuntime.listForAssistant).toHaveBeenCalledWith(context);
+		expect(skillRuntime.readForAssistant).toHaveBeenCalledWith(context, summary.id);
 	});
 });

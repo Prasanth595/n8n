@@ -1,4 +1,3 @@
-import type { AssistantSkillSummary } from '@n8n/backend-services';
 import {
 	BaseRepository,
 	LIKE_ESCAPE_CLAUSE,
@@ -13,23 +12,19 @@ import { Brackets, DataSource, In, type EntityManager } from '@n8n/typeorm';
 import { UnexpectedError } from 'n8n-workflow';
 import { randomUUID } from 'node:crypto';
 
-import { compareSkillFilePaths, skillContentHash, type SkillContent } from './skill-content-hash';
-import { SkillFile } from './skill-file.entity';
-import { SkillVersion } from './skill-version.entity';
-import { Skill, type SkillSource } from './skill.entity';
-
-/**
- * Where a skill lives: a project, one agent, or the instance (both null). An agent skill
- * has no projectId: its project is the agent's.
- */
-export type SkillTarget = { projectId: string | null; agentId: string | null };
-
-/** One skill with one of its version rows and that row's files, sorted by path. */
-export type ResolvedSkillRow = {
-	skill: Skill;
-	version: SkillVersion;
-	files: SkillFile[];
-};
+import {
+	compareSkillFilePaths,
+	skillContentHash,
+	type SkillContent,
+} from '../../utils/skill-content-hash';
+import type {
+	AssistantSkillSummary,
+	ResolvedSkillRow,
+	SkillTarget,
+} from '../../utils/skill-content';
+import { SkillFile } from '../entities/skill-file.entity';
+import { SkillVersion } from '../entities/skill-version.entity';
+import { Skill, type SkillSource } from '../entities/skill.entity';
 
 /**
  * Which skills one user may list: instance skills always, plus the skills of these
@@ -55,11 +50,19 @@ export type SkillListFilter = {
 /** Latest version of a skill without its content. */
 export type SkillSummary = { name: string; description: string; version: number };
 
-/** Persistence for skills, their versions and their files. */
-@Service()
-export class SkillRepository extends BaseRepository<Skill> {
+class SkillTable extends BaseRepository<Skill> {
 	constructor(dataSource: DataSource, transactionRunner: TransactionRunner) {
 		super(Skill, dataSource.manager, transactionRunner);
+	}
+}
+
+/** Persistence for skills, their versions and their files. */
+@Service()
+export class SkillRepository {
+	private readonly table: SkillTable;
+
+	constructor(dataSource: DataSource, transactionRunner: TransactionRunner) {
+		this.table = new SkillTable(dataSource, transactionRunner);
 	}
 
 	/**
@@ -73,7 +76,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		filter: SkillListFilter,
 		ctx: OperationContext = {},
 	): Promise<{ skills: Skill[]; count: number }> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		// An agent skill has no projectId: it is visible through its agent, one of `agentIds`.
 		const { projectIds, agentIds } = visibility;
 		const branches: string[] = [];
@@ -145,7 +148,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 	}
 
 	async findAssistantSkillSummaries(projectId: string | null): Promise<AssistantSkillSummary[]> {
-		return await assistantVersionsQuery(this.manager, projectId)
+		return await assistantVersionsQuery(this.table.manager, projectId)
 			.select('skill.id', 'id')
 			.addSelect('skill.projectId', 'projectId')
 			.addSelect('version.id', 'versionId')
@@ -160,7 +163,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		skillId: string,
 		projectId: string | null,
 	): Promise<ResolvedSkillRow | null> {
-		const version = await assistantVersionsQuery(this.manager, projectId)
+		const version = await assistantVersionsQuery(this.table.manager, projectId)
 			.andWhere('skill.id = :skillId', { skillId })
 			.getOne();
 		if (!version) return null;
@@ -173,11 +176,11 @@ export class SkillRepository extends BaseRepository<Skill> {
 		available: boolean,
 		ctx: OperationContext,
 	): Promise<void> {
-		await this.managerFor(ctx).update(Skill, skillId, { availableToAssistant: available });
+		await this.table.managerFor(ctx).update(Skill, skillId, { availableToAssistant: available });
 	}
 
 	async findByIds(ids: string[], ctx: OperationContext = {}): Promise<Skill[]> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		return await inChunks(
 			ids,
 			async (chunk) => await manager.find(Skill, { where: { id: In(chunk) } }),
@@ -189,7 +192,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		skillIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, ResolvedSkillRow>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const versions = await inChunks(
 			skillIds,
 			async (chunk) => await latestVersionsQuery(manager, chunk).getMany(),
@@ -202,7 +205,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		skillIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, SkillSummary>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const versions = await inChunks(
 			skillIds,
 			async (chunk) =>
@@ -223,7 +226,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		skillIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, string>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const versions = await inChunks(
 			skillIds,
 			async (chunk) =>
@@ -242,7 +245,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		target: SkillTarget,
 		ctx: OperationContext = {},
 	): Promise<Array<{ skillId: string; name: string }>> {
-		const query = highestVersionsQuery(this.managerFor(ctx))
+		const query = highestVersionsQuery(this.table.managerFor(ctx))
 			.innerJoin(Skill, 'skill', 'skill.id = version.skillId')
 			.select(['version.skillId', 'version.name']);
 		if (target.agentId) {
@@ -264,7 +267,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		ctx: OperationContext = {},
 	): Promise<Map<string, ResolvedSkillRow>> {
 		if (versionIds.length === 0) return new Map();
-		const versions = await this.managerFor(ctx).find(SkillVersion, {
+		const versions = await this.table.managerFor(ctx).find(SkillVersion, {
 			where: { id: In(unique(versionIds)) },
 		});
 		const rows = await this.resolve(versions, ctx);
@@ -273,7 +276,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 
 	/** The next version number of a skill: the highest version plus one, or 1. */
 	async nextVersionNumber(skillId: string, ctx: OperationContext = {}): Promise<number> {
-		const latest = await this.managerFor(ctx).findOne(SkillVersion, {
+		const latest = await this.table.managerFor(ctx).findOne(SkillVersion, {
 			select: ['version'],
 			where: { skillId },
 			order: { version: 'DESC' },
@@ -287,7 +290,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		content: SkillContent,
 		ctx: OperationContext = {},
 	): Promise<string> {
-		return await this.runInTransaction(ctx, async (manager) => {
+		return await this.table.runInTransaction(ctx, async (manager) => {
 			await manager.insert(Skill, {
 				id: skill.id,
 				projectId: skill.target.projectId,
@@ -307,7 +310,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		createdById: string | null,
 		ctx: OperationContext = {},
 	): Promise<string> {
-		return await this.runInTransaction(ctx, async (manager) => {
+		return await this.table.runInTransaction(ctx, async (manager) => {
 			const id = await insertVersion(manager, skillId, version, content, createdById);
 			await manager.update(Skill, { id: skillId }, { updatedAt: new Date() });
 			return id;
@@ -319,7 +322,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		versionIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, string>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const versions = await inChunks(
 			unique(versionIds),
 			async (chunk) =>
@@ -336,7 +339,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		versionIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, number>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const versions = await inChunks(
 			versionIds,
 			async (chunk) =>
@@ -350,7 +353,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 
 	/** Moves a skill to a project, one agent or the instance. */
 	async updateTarget(skillId: string, target: SkillTarget, ctx: OperationContext = {}) {
-		await this.managerFor(ctx).update(
+		await this.table.managerFor(ctx).update(
 			Skill,
 			{ id: skillId },
 			{
@@ -367,7 +370,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		projectIds: string[],
 		ctx: OperationContext = {},
 	): Promise<Map<string, Pick<Project, 'name' | 'type'>>> {
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const projects = await inChunks(
 			projectIds,
 			async (chunk) =>
@@ -381,12 +384,33 @@ export class SkillRepository extends BaseRepository<Skill> {
 		);
 	}
 
+	/** Ids of every skill, optionally of one source, in id order. For test fixtures. */
+	async findAllIds(filter: { source?: SkillSource } = {}): Promise<string[]> {
+		const skills = await this.table.find({ select: ['id'], where: filter, order: { id: 'ASC' } });
+		return skills.map((skill) => skill.id);
+	}
+
+	/** Every row of the skill tables, in a fixed order. For test fixtures. */
+	async findAllRows(): Promise<[Skill[], SkillVersion[], SkillFile[]]> {
+		const { manager } = this.table;
+		return await Promise.all([
+			manager.find(Skill, { order: { id: 'ASC' } }),
+			manager.find(SkillVersion, { order: { id: 'ASC' } }),
+			manager.find(SkillFile, { order: { skillVersionId: 'ASC', path: 'ASC' } }),
+		]);
+	}
+
+	/** Deletes every skill, with the same cascades as `deleteSkill`. For test fixtures. */
+	async deleteAll(): Promise<void> {
+		await this.table.manager.delete(Skill, {});
+	}
+
 	/**
 	 * Deletes the skill. Its versions, files, dependency rows and pins go by cascade,
 	 * so callers check usage first.
 	 */
 	async deleteSkill(skillId: string, ctx: OperationContext = {}): Promise<void> {
-		await this.managerFor(ctx).delete(Skill, { id: skillId });
+		await this.table.managerFor(ctx).delete(Skill, { id: skillId });
 	}
 
 	/**
@@ -409,8 +433,8 @@ export class SkillRepository extends BaseRepository<Skill> {
 	): Promise<void> {
 		if (!ctx.trx) throw new UnexpectedError('Skill row locks need a transaction');
 		// SQLite allows one write transaction at a time, so the rows cannot change under us.
-		if (skillIds.length === 0 || this.manager.connection.options.type !== 'postgres') return;
-		await this.managerFor(ctx).find(Skill, {
+		if (skillIds.length === 0 || this.table.manager.connection.options.type !== 'postgres') return;
+		await this.table.managerFor(ctx).find(Skill, {
 			select: ['id'],
 			where: { id: In(unique(skillIds)) },
 			lock: { mode },
@@ -431,7 +455,7 @@ export class SkillRepository extends BaseRepository<Skill> {
 		ctx: OperationContext,
 	): Promise<ResolvedSkillRow[]> {
 		if (versions.length === 0) return [];
-		const manager = this.managerFor(ctx);
+		const manager = this.table.managerFor(ctx);
 		const skills = await this.findByIds(
 			versions.map((version) => version.skillId),
 			ctx,

@@ -15,14 +15,17 @@ import type { AgentScope } from '@/modules/agents/entities/agent.entity';
 import { AgentHistoryRepository } from '@/modules/agents/repositories/agent-history.repository';
 import { AgentSkillRepository } from '@/modules/agents/repositories/agent-skill.repository';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
-import { registerSkillAgentsProvider } from '@/modules/agents/register-skill-agents-provider';
-import { HubAssistantSkillProvider } from '@/modules/skills/hub-assistant-skill-provider.service';
-import { skillContentHash, type SkillContent } from '@/modules/skills/skill-content-hash';
-import { SkillRepository, type SkillVisibility } from '@/modules/skills/skill.repository';
-import { SkillService } from '@/modules/skills/skill.service';
+import { registerSkillUsage } from '@/modules/agents/register-skill-usage';
+import { skillContentHash, type SkillContent } from '../../utils/skill-content-hash';
+import {
+	SkillRepository,
+	type SkillVisibility,
+} from '../../database/repositories/skill.repository';
+import { SkillRuntimeService } from '../../services/skill-runtime.service';
+import { SkillService } from '../../services/skill.service';
 import { PostHogClient } from '@/posthog';
 
-import { createOwner, createUser } from '../shared/db/users';
+import { createOwner, createUser } from '@test-integration/db/users';
 
 /** More ids than SQLite binds in one query (32,766). */
 const manyUnknownIds = () => Array.from({ length: 33_000 }, (_, i) => `skill_unknown${i}`);
@@ -39,7 +42,7 @@ const content = (overrides: Partial<SkillContent> = {}): SkillContent => ({
 describe('SkillRepository', () => {
 	const postHog = mockInstance(PostHogClient);
 	let skills: SkillRepository;
-	let assistantSkills: HubAssistantSkillProvider;
+	let skillRuntime: SkillRuntimeService;
 	let owner: User;
 	let agentSkills: AgentSkillRepository;
 	let agents: AgentRepository;
@@ -57,8 +60,8 @@ describe('SkillRepository', () => {
 		agents = Container.get(AgentRepository);
 		histories = Container.get(AgentHistoryRepository);
 		txRunner = Container.get(TransactionRunner);
-		registerSkillAgentsProvider();
-		assistantSkills = Container.get(HubAssistantSkillProvider);
+		registerSkillUsage();
+		skillRuntime = Container.get(SkillRuntimeService);
 		owner = await createOwner();
 		user = await createUser();
 		project = await createTeamProject('Team');
@@ -74,7 +77,7 @@ describe('SkillRepository', () => {
 	afterEach(async () => {
 		// Agent rows cascade to their history, pins and dependency rows.
 		await agents.delete({});
-		await skills.delete({});
+		await skills.deleteAll();
 	});
 
 	afterAll(async () => {
@@ -86,8 +89,7 @@ describe('SkillRepository', () => {
 		const scoped = await createSkill({ projectId: project.id });
 		const other = await createSkill({ projectId: otherProject.id });
 		const disabled = await createSkill();
-		for (const id of [instance, scoped, other])
-			await skills.update(id, { availableToAssistant: true });
+		for (const id of [instance, scoped, other]) await skills.setAssistantAvailability(id, true, {});
 		const versionId = await skills.insertSavedVersion(
 			scoped,
 			2,
@@ -98,10 +100,10 @@ describe('SkillRepository', () => {
 			}),
 			null,
 		);
-		expect((await assistantSkills.listSkills({ user: owner })).map(({ id }) => id)).toEqual([
+		expect((await skillRuntime.listForAssistant({ user: owner })).map(({ id }) => id)).toEqual([
 			instance,
 		]);
-		const result = await assistantSkills.listSkills({ user: owner, projectId: project.id });
+		const result = await skillRuntime.listForAssistant({ user: owner, projectId: project.id });
 		expect(result.map(({ id }) => id).sort()).toEqual([instance, scoped].sort());
 		expect(result.find(({ id }) => id === scoped)).toEqual({
 			id: scoped,
@@ -134,13 +136,13 @@ describe('SkillRepository', () => {
 				scope,
 			});
 			const id = await createSkill({ agentId: agent.id });
-			await skills.update(id, { availableToAssistant: true });
+			await skills.setAssistantAvailability(id, true, {});
 
 			expect(await skills.findAssistantSkillSummaries(null)).toEqual([]);
 			expect(await skills.findAssistantSkillSummaries(project.id)).toEqual([]);
 			expect(await skills.findAssistantSkill(id, project.id)).toBeNull();
 			expect(
-				await assistantSkills.readSkill({ user: owner, projectId: project.id }, id),
+				await skillRuntime.readForAssistant({ user: owner, projectId: project.id }, id),
 			).toBeNull();
 		},
 	);
@@ -165,7 +167,7 @@ describe('SkillRepository', () => {
 	it('clears Assistant availability only when a skill moves to an agent', async () => {
 		const id = await createSkill();
 		const agent = await createAgent('Private scope');
-		await skills.update(id, { availableToAssistant: true });
+		await skills.setAssistantAvailability(id, true, {});
 		await skills.updateTarget(id, { projectId: project.id, agentId: null });
 		expect((await skills.findByIds([id]))[0].availableToAssistant).toBe(true);
 		await skills.updateTarget(id, { projectId: null, agentId: agent.id });
@@ -221,7 +223,7 @@ describe('SkillRepository', () => {
 		return versionId;
 	}
 
-	/** What `SkillsApiService` passes: the projects, and the agents in them. */
+	/** What `SkillService` passes: the projects, and the agents in them. */
 	async function visibleTo(projectIds: string[] | 'all'): Promise<SkillVisibility> {
 		return {
 			projectIds,
@@ -693,7 +695,7 @@ describe('SkillRepository', () => {
 
 			await skills.deleteSkill(id);
 
-			expect(await agentSkills.findPinned(agentVersionId)).toEqual(new Map());
+			expect(await agentSkills.findPins(agentVersionId)).toEqual([]);
 		});
 	});
 

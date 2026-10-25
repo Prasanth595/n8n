@@ -41,8 +41,7 @@ import { CredentialsService } from '@/credentials/credentials.service';
 import { ExecutionListService } from '@/executions/execution-list.service';
 
 import { ExecutionService } from '@/executions/execution.service';
-import { SkillsApiService } from '@/modules/skills/skills-api.service';
-import { SkillAgentsProxy } from '@/modules/skills/skill-agents-proxy.service';
+import { SkillService, SkillsGate } from '@/modules/skills';
 import { DataTableProxyService } from '@/modules/data-table/data-table-proxy.service';
 import { InstanceContextService } from '@/modules/instance-ai/instance-context.service';
 import {
@@ -250,7 +249,7 @@ describe('McpService scope enforcement', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
-		mockInstance(SkillAgentsProxy, { hasProvider: false });
+		mockInstance(SkillsGate, { isEnabled: false });
 	});
 
 	it('every tool registered by getServer is covered by the scope map (drift guard)', async () => {
@@ -284,10 +283,10 @@ describe('McpService scope enforcement', () => {
 	});
 
 	it.each([true, false])(
-		'registers the skill tools only with an agents provider: %s',
-		async (hasProvider) => {
-			mockInstance(SkillsApiService);
-			mockInstance(SkillAgentsProxy, { hasProvider });
+		'registers the skill tools only while the skills gate is on: %s',
+		async (skillsEnabled) => {
+			mockInstance(SkillService);
+			mockInstance(SkillsGate, { isEnabled: skillsEnabled });
 			const server = await buildService({
 				builderEnabled: false,
 				agentsActive: true,
@@ -296,7 +295,7 @@ describe('McpService scope enforcement', () => {
 
 			expect(registered.has('mutate_agent')).toBe(false);
 			expect([...SKILL_TOOLS].filter((name) => registered.has(name))).toEqual(
-				hasProvider ? [...SKILL_TOOLS] : [],
+				skillsEnabled ? [...SKILL_TOOLS] : [],
 			);
 		},
 	);
