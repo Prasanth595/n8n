@@ -451,6 +451,8 @@ export class AssistantTurnEnvironmentFactory {
 			flags: { configEvalsEnabled, instanceContextEnabled },
 			// The agent-building skills need the build-agent tool, which needs a builder delegate.
 			agentBuildingEnabled: context.builderDelegate !== undefined,
+			// Without a scheduler, the planned-task tools and skills are left out.
+			plannedTasksEnabled: runtime.schedulePlannedTasks !== undefined,
 		};
 		const skills = await this.skillsService.loadSkills(skillScope);
 		const promptMetadata = describePromptProfile(selectedPrompt, skills.source);
